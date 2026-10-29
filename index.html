@@ -51,7 +51,22 @@ const $ = (s) => document.querySelector(s);
 const pad = (n) => String(n).padStart(2, "0");
 const hm = (d) => d ? pad(d.getHours()) + ":" + pad(d.getMinutes()) : "";
 const mins = (a, b) => Math.round((b - a) / 60000);
-let route = null, state = null, key = "";
+let route = null, state = null, key = "", frag = "", carried = null;
+const android = /Android/i.test(navigator.userAgent);
+
+function canSendFiles() {  // Chrome: yes; Firefox and some others: no -> they can only download
+  try { return !!(navigator.canShare && navigator.canShare({ files: [new File(["x"], "x.json", { type: "application/json" })] })); }
+  catch (e) { return false; }
+}
+
+// the same page in Chrome, the times logged so far going along (after a '.' in the link)
+function chromeLink() {
+  const times = btoa(JSON.stringify(state.times)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+  return "intent://" + location.host + location.pathname + "#" + frag + "." + times +
+         "#Intent;scheme=https;package=com.android.chrome;end";
+}
+
+function stamps(s) { return s.times.reduce((n, t) => n + (t.a ? 1 : 0) + (t.l ? 1 : 0), 0); }
 
 async function decode(fragment) {
   const b64 = fragment.replace(/-/g, "+").replace(/_/g, "/");
@@ -63,7 +78,13 @@ async function decode(fragment) {
 function save() { try { localStorage.setItem(key, JSON.stringify(state)); } catch (e) {} }
 
 function load() {
-  try { const s = JSON.parse(localStorage.getItem(key) || "null"); if (s && s.times) return s; } catch (e) {}
+  let s = null;
+  try { s = JSON.parse(localStorage.getItem(key) || "null"); } catch (e) {}
+  if (!(s && s.times)) s = null;
+  if (carried && carried.length === route.p.length && (!s || stamps({ times: carried }) > stamps(s))) {
+    s = { times: carried }; localStorage.setItem(key, JSON.stringify(s));  // came over from Firefox
+  }
+  if (s) return s;
   return { times: route.p.map(() => ({ a: null, l: null })) };  // a = arrived, l = left (ISO strings)
 }
 
@@ -159,6 +180,11 @@ function render() {
     html += `<div class="card"><div class="done">Day done ✓</div>
       <div class="muted">Save the results - they go to the Route planner.</div></div>`;
   }
+  if (android && !canSendFiles()) {
+    html += `<div class="card"><div class="muted">This browser can only download the results - in Chrome
+      'Save results' sends them to Gmail / Drive. Your times so far go along.</div>
+      <a href="${chromeLink()}"><button class="big">Open in Chrome</button></a></div>`;
+  }
   html += `<div class="row"><button class="small" id="save">Save results</button>
     <button class="small" id="undo">Undo last</button></div><div class="card"><ol>`;
   route.p.forEach(([name, drive], i) => {
@@ -188,7 +214,11 @@ function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<
 window.addEventListener("hashchange", () => location.reload());  // a new route's link opened over the old one
 
 (async function start() {
-  const frag = location.hash.slice(1);
+  const parts = location.hash.slice(1).split(".");
+  frag = parts[0];
+  if (parts[1]) {
+    try { carried = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"))); } catch (e) { carried = null; }
+  }
   if (!frag) {
     $("#app").innerHTML = `<div class="empty"><h1>Route log</h1><p class="muted">Open it from the QR code
       'Log real times' in the Route planner (NatureGift Tools).</p></div>`;
