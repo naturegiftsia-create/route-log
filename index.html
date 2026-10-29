@@ -11,7 +11,7 @@
           --orange:#b35900; --red:#c5221f; --line:#e1e4e8; }
   @media (prefers-color-scheme: dark) {
     :root { --bg:#121417; --card:#1d2024; --text:#e8eaed; --muted:#9aa0a6; --line:#2c3036; --blue:#8ab4f8;
-            --green:#81c995; --orange:#fcad70; --red:#f28b82; }
+            --green:#81c995; --orange:#fcad70; --red:#f28b82; --on-button:#0b1a2e; }
   }
   * { box-sizing:border-box; }
   body { margin:0; background:var(--bg); color:var(--text); font:16px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
@@ -24,7 +24,7 @@
   .next .eta { font-size:16px; }
   .eta b { font-size:18px; }
   button.big { display:block; width:100%; border:0; border-radius:12px; padding:18px; font-size:20px; font-weight:700;
-               color:#fff; background:var(--blue); margin-top:12px; }
+               color:var(--on-button, #fff); background:var(--blue); margin-top:12px; }  /* dark text on light dark-mode buttons: readable in sun */
   button.big.arrive { background:var(--green); }
   button.small { border:1px solid var(--line); background:var(--card); color:var(--text); border-radius:10px;
                  padding:10px 12px; font-size:15px; }
