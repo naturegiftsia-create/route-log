@@ -26,6 +26,8 @@
   button.big { display:block; width:100%; border:0; border-radius:12px; padding:18px; font-size:20px; font-weight:700;
                color:var(--on-button, #fff); background:var(--blue); margin-top:12px; }  /* dark text on light dark-mode buttons: readable in sun */
   button.big.arrive { background:var(--green); }
+  button.big.waze { background:#33ccff; color:#0b1a2e; }
+  a { text-decoration:none; }
   button.small { border:1px solid var(--line); background:var(--card); color:var(--text); border-radius:10px;
                  padding:10px 12px; font-size:15px; }
   .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
@@ -196,6 +198,9 @@ async function saveResults() {
   a.href = URL.createObjectURL(file); a.download = name; a.click();
 }
 
+// Waze from wherever you are now to that point (user, 29.10.2026 - everyone here has Waze)
+const waze = ([lat, lng]) => `https://waze.com/ul?ll=${lat},${lng}&navigate=yes`;
+
 const reasonText = (r) => (REASONS.find((x) => x[0] === r) || [r, r])[1];
 
 function render() {
@@ -225,6 +230,7 @@ function render() {
     }
     html += `<div class="card next"><div class="label">${kind === "a" ? "Next" : (i === 0 ? "Start" : "Now at")}</div>
       <div class="name">${esc(name)}</div>${info}
+      ${kind === "a" && route.p[i][3] ? `<a href="${waze(route.p[i][3])}" target="_blank" rel="noopener"><button class="big waze">Drive with Waze</button></a>` : ""}
       <button class="big ${kind === "a" ? "arrive" : ""}" id="go">${kind === "a" ? "Arrived" : "Leaving"}</button>
       ${kind === "a" && i < n - 1 ? `<button class="small" id="skip" style="margin-top:10px">Skip this one</button>` : ""}</div>`;
   } else {
