@@ -39,6 +39,9 @@
   .late { color:var(--red); } .early { color:var(--green); }
   .done { color:var(--green); font-weight:700; }
   .empty { text-align:center; padding:40px 10px; }
+  .skipped { text-decoration:line-through; color:var(--muted); }
+  button.big.reason { background:var(--line); color:var(--text); margin-top:8px; padding:14px; }
+  button.small:disabled { opacity:.45; }
 </style>
 </head>
 <body>
@@ -46,12 +49,14 @@
 <script>
 // Route log (NatureGift Tools, 29.10.2026): the day's route comes inside this page's link (the part after '#',
 // which browsers never send to a server). Times are kept only on this phone (localStorage) until 'Save results'.
+// A point can be skipped; pauses (charging, fuel, lunch, WC) are logged apart - never counted as driving or stop time.
 "use strict";
 const $ = (s) => document.querySelector(s);
 const pad = (n) => String(n).padStart(2, "0");
 const hm = (d) => d ? pad(d.getHours()) + ":" + pad(d.getMinutes()) : "";
 const mins = (a, b) => Math.round((b - a) / 60000);
-let route = null, state = null, key = "", frag = "", carried = null;
+const REASONS = [["charging", "⚡ Charging"], ["fuel", "⛽ Fuel"], ["lunch", "🍽 Lunch"], ["wc", "🚻 WC"], ["other", "Other"]];
+let route = null, state = null, key = "", frag = "", carried = null, choosing = false, hist = [];
 const android = /Android/i.test(navigator.userAgent);
 
 function canSendFiles() {  // Chrome: yes; Firefox and some others: no -> they can only download
@@ -59,14 +64,17 @@ function canSendFiles() {  // Chrome: yes; Firefox and some others: no -> they c
   catch (e) { return false; }
 }
 
-// the same page in Chrome, the times logged so far going along (after a '.' in the link)
+const b64url = (s) => btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+
+// the same page in Chrome, everything logged so far going along (after a '.' in the link)
 function chromeLink() {
-  const times = btoa(JSON.stringify(state.times)).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
-  return "intent://" + location.host + location.pathname + "#" + frag + "." + times +
+  return "intent://" + location.host + location.pathname + "#" + frag + "." + b64url(JSON.stringify(state)) +
          "#Intent;scheme=https;package=com.android.chrome;end";
 }
 
-function stamps(s) { return s.times.reduce((n, t) => n + (t.a ? 1 : 0) + (t.l ? 1 : 0), 0); }
+function marks(s) {
+  return s.times.reduce((n, t) => n + (t.a ? 1 : 0) + (t.l ? 1 : 0) + (t.s ? 1 : 0), 0) + (s.pauses || []).length;
+}
 
 async function decode(fragment) {
   const b64 = fragment.replace(/-/g, "+").replace(/_/g, "/");
@@ -75,72 +83,103 @@ async function decode(fragment) {
   return JSON.parse(await new Response(stream).text());
 }
 
-function save() { try { localStorage.setItem(key, JSON.stringify(state)); } catch (e) {} }
+function save() {
+  try { localStorage.setItem(key, JSON.stringify(state)); localStorage.setItem(key + ":h", JSON.stringify(hist)); }
+  catch (e) {}
+}
+
+function fresh() { return { times: route.p.map(() => ({ a: null, l: null })), pauses: [] }; }
 
 function load() {
   let s = null;
-  try { s = JSON.parse(localStorage.getItem(key) || "null"); } catch (e) {}
+  try { s = JSON.parse(localStorage.getItem(key) || "null"); hist = JSON.parse(localStorage.getItem(key + ":h") || "[]"); }
+  catch (e) {}
   if (!(s && s.times)) s = null;
-  if (carried && carried.length === route.p.length && (!s || stamps({ times: carried }) > stamps(s))) {
-    s = { times: carried }; localStorage.setItem(key, JSON.stringify(s));  // came over from Firefox
+  if (carried && carried.times && carried.times.length === route.p.length && (!s || marks(carried) > marks(s))) {
+    s = carried; hist = [];  // came over from Firefox
   }
-  if (s) return s;
-  return { times: route.p.map(() => ({ a: null, l: null })) };  // a = arrived, l = left (ISO strings)
+  s = s || fresh();
+  s.pauses = s.pauses || [];
+  return s;
 }
+
+// every change can be undone, one step at a time
+function change(fn) {
+  hist.push(JSON.stringify(state));
+  if (hist.length > 60) hist.shift();
+  fn(); save(); render();
+}
+
+function undo() {
+  if (!hist.length) return;
+  state = JSON.parse(hist.pop()); save(); render();
+}
+
+const paused = () => { const p = state.pauses[state.pauses.length - 1]; return p && !p.e ? p : null; };
 
 // the next thing to press: [point index, 'a' | 'l'] - the start is only left, the end only arrived at
 function nextStep() {
   const n = route.p.length;
   for (let i = 0; i < n; i++) {
     const t = state.times[i];
+    if (t.s) continue;
     if (i > 0 && !t.a) return [i, "a"];
     if (i < n - 1 && !t.l) return [i, "l"];
   }
   return null;
 }
 
-function eta(i) {  // when Google expects us at point i, from the last real time before it
+function eta(i) {  // when Google expects us at point i, from the last real time before it (skipped points: driven past)
   for (let j = i - 1; j >= 0; j--) {
     const t = state.times[j];
+    if (t.s) continue;
     const from = t.l ? new Date(t.l) : (t.a ? new Date(new Date(t.a).getTime() + route.m * 60000) : null);
     if (from) {
       let total = 0;
-      for (let k = j + 1; k <= i; k++) total += route.p[k][1] + (k < i ? route.m : 0);
-      return new Date(from.getTime() + total * 60000);
+      for (let k = j + 1; k <= i; k++) total += route.p[k][1] + (k < i && !state.times[k].s ? route.m : 0);
+      const p = paused();
+      const extra = p ? mins(new Date(p.s), new Date()) : 0;  // the pause so far pushes it on
+      return new Date(from.getTime() + (total + extra) * 60000);
     }
   }
   return null;
 }
 
-function stamp(i, kind) {
-  state.times[i][kind] = new Date().toISOString();
-  save(); render();
+function stamp(i, kind) { change(() => { state.times[i][kind] = new Date().toISOString(); }); }
+
+function skip(i) {
+  if (confirm("Skip " + route.p[i][0] + "? (not visited today)")) change(() => { state.times[i].s = true; });
 }
+
+function pause(reason) {
+  choosing = false;
+  change(() => state.pauses.push({ r: reason, s: new Date().toISOString(), e: null }));
+}
+
+function resume() { change(() => { paused().e = new Date().toISOString(); }); }
 
 function edit(i, kind) {
   const t = state.times[i][kind];
   const now = t ? hm(new Date(t)) : hm(new Date());
   const v = prompt((kind === "a" ? "Arrived at " : "Left ") + route.p[i][0] + " (HH:MM, empty = clear):", now);
   if (v === null) return;
-  if (!v.trim()) { state.times[i][kind] = null; save(); render(); return; }
+  if (!v.trim()) { change(() => { state.times[i][kind] = null; }); return; }
   const m = v.trim().match(/^(\d{1,2})[:.](\d{2})$/);
   if (!m) { alert("Write it like 14:35"); return; }
   const [y, mo, d] = route.d.split("-").map(Number);
-  state.times[i][kind] = new Date(y, mo - 1, d, +m[1], +m[2]).toISOString();
-  save(); render();
-}
-
-function undo() {
-  for (let i = route.p.length - 1; i >= 0; i--) {
-    for (const k of ["l", "a"]) if (state.times[i][k]) { state.times[i][k] = null; save(); render(); return; }
-  }
+  change(() => { state.times[i][kind] = new Date(y, mo - 1, d, +m[1], +m[2]).toISOString(); });
 }
 
 function results() {
-  const points = route.p.map(([name, drive], i) => ({ name, google_drive_min: drive,
-    arrived: state.times[i].a, left: state.times[i].l }));
-  return { app: "NatureGift route log", version: 1, date: route.d, leave_planned: route.l, stop_min_planned: route.m,
-           points, saved_at: new Date().toISOString() };
+  const points = route.p.map(([name, drive, planned], i) => {
+    const t = state.times[i], p = { name, google_drive_min: drive, arrived: t.a, left: t.l };
+    if (planned) p.planned = planned;
+    if (t.s) p.skipped = true;
+    return p;
+  });
+  const pauses = state.pauses.filter((p) => p.e).map((p) => ({ reason: p.r, start: p.s, end: p.e }));
+  return { app: "NatureGift route log", version: 2, date: route.d, leave_planned: route.l, stop_min_planned: route.m,
+           points, pauses, saved_at: new Date().toISOString() };
 }
 
 async function saveResults() {
@@ -148,7 +187,7 @@ async function saveResults() {
   const name = "route-" + route.d + ".json";
   const file = new File([text], name, { type: "application/json" });
   try {
-    if (navigator.canShare && navigator.canShare({ files: [file] })) {  // Android: Drive, e-mail, ...
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {  // Android: Gmail, Drive, ...
       await navigator.share({ files: [file], title: name });
       return;
     }
@@ -157,11 +196,22 @@ async function saveResults() {
   a.href = URL.createObjectURL(file); a.download = name; a.click();
 }
 
+const reasonText = (r) => (REASONS.find((x) => x[0] === r) || [r, r])[1];
+
 function render() {
-  const n = route.p.length, step = nextStep();
+  const n = route.p.length, step = nextStep(), p = paused();
   let html = `<h1>Route ${route.d.split("-").reverse().join(".")}</h1>
     <div class="muted">${n - 2} stops · planned leave ${route.l} · ${route.m} min per stop</div>`;
-  if (step) {
+  if (p) {
+    html += `<div class="card next"><div class="label">Paused</div>
+      <div class="name">${reasonText(p.r)}</div>
+      <div class="eta">since ${hm(new Date(p.s))} (${mins(new Date(p.s), new Date())} min) - not counted as driving</div>
+      <button class="big arrive" id="resume">Continue</button></div>`;
+  } else if (choosing) {
+    html += `<div class="card next"><div class="label">Pause for</div>
+      ${REASONS.map(([r, t]) => `<button class="big reason" data-r="${r}">${t}</button>`).join("")}
+      <button class="small" id="nopause" style="margin-top:12px">Cancel</button></div>`;
+  } else if (step) {
     const [i, kind] = step, name = route.p[i][0];
     let info = "";
     if (kind === "a") {
@@ -175,26 +225,32 @@ function render() {
     }
     html += `<div class="card next"><div class="label">${kind === "a" ? "Next" : (i === 0 ? "Start" : "Now at")}</div>
       <div class="name">${esc(name)}</div>${info}
-      <button class="big ${kind === "a" ? "arrive" : ""}" id="go">${kind === "a" ? "Arrived" : "Leaving"}</button></div>`;
+      <button class="big ${kind === "a" ? "arrive" : ""}" id="go">${kind === "a" ? "Arrived" : "Leaving"}</button>
+      ${kind === "a" && i < n - 1 ? `<button class="small" id="skip" style="margin-top:10px">Skip this one</button>` : ""}</div>`;
   } else {
     html += `<div class="card"><div class="done">Day done ✓</div>
       <div class="muted">Save the results - they go to the Route planner.</div></div>`;
   }
   if (android && !canSendFiles()) {
     html += `<div class="card"><div class="muted">This browser can only download the results - in Chrome
-      'Save results' sends them to Gmail / Drive. Your times so far go along.</div>
+      'Save results' sends them to Gmail / Drive. Everything logged so far goes along.</div>
       <a href="${chromeLink()}"><button class="big">Open in Chrome</button></a></div>`;
   }
-  html += `<div class="row"><button class="small" id="save">Save results</button>
-    <button class="small" id="undo">Undo last</button></div><div class="card"><ol>`;
+  html += `<div class="row">${!p && !choosing && step ? `<button class="small" id="pause">Pause…</button>` : ""}
+    <button class="small" id="save">Save results</button>
+    <button class="small" id="undo" ${hist.length ? "" : "disabled"}>Undo last</button></div><div class="card"><ol>`;
   route.p.forEach(([name, drive], i) => {
     const t = state.times[i], cur = step && step[0] === i;
+    if (t.s) {
+      html += `<li><div class="pt skipped">${i}. ${esc(name)}</div><div class="times">skipped</div></li>`;
+      return;
+    }
     let real = "";
-    if (i > 0 && t.a && state.times[i - 1].l) {
-      const d = mins(new Date(state.times[i - 1].l), new Date(t.a)), diff = d - drive;
+    if (i > 0 && t.a && state.times[i - 1].l && !state.times[i - 1].s) {
+      const d = mins(new Date(state.times[i - 1].l), new Date(t.a)) - pausedMin(state.times[i - 1].l, t.a), diff = d - drive;
       real = ` · real <span class="${diff > 3 ? "late" : diff < -3 ? "early" : ""}">${d} min</span>`;
     }
-    const stay = t.a && t.l ? ` · stop ${mins(new Date(t.a), new Date(t.l))} min` : "";
+    const stay = t.a && t.l ? ` · stop ${mins(new Date(t.a), new Date(t.l)) - pausedMin(t.a, t.l)} min` : "";
     html += `<li class="${cur ? "current" : ""}"><div class="pt">${i === 0 ? "▶ " : i === n - 1 ? "■ " : i + ". "}${esc(name)}</div>
       <div class="times">${i > 0 ? `<span>Google ${drive} min${real}</span>` : ""}
       ${i > 0 ? `<span>arrived <span class="t" data-i="${i}" data-k="a">${t.a ? hm(new Date(t.a)) : "--:--"}</span></span>` : ""}
@@ -202,22 +258,42 @@ function render() {
       ${stay}</div></li>`;
   });
   html += "</ol></div>";
+  const done = state.pauses.filter((x) => x.e);
+  if (done.length) {
+    html += `<div class="card"><div class="label muted">Pauses</div><ol>${done.map((x) =>
+      `<li>${reasonText(x.r)} <span class="muted">${hm(new Date(x.s))}–${hm(new Date(x.e))} · ${mins(new Date(x.s), new Date(x.e))} min</span></li>`).join("")}</ol></div>`;
+  }
   $("#app").innerHTML = html;
-  if (step) $("#go").onclick = () => stamp(step[0], step[1]);
+  if ($("#go")) $("#go").onclick = () => stamp(step[0], step[1]);
+  if ($("#skip")) $("#skip").onclick = () => skip(step[0]);
+  if ($("#pause")) $("#pause").onclick = () => { choosing = true; render(); };
+  if ($("#nopause")) $("#nopause").onclick = () => { choosing = false; render(); };
+  if ($("#resume")) $("#resume").onclick = resume;
+  document.querySelectorAll(".reason").forEach((el) => el.onclick = () => pause(el.dataset.r));
   $("#save").onclick = saveResults;
-  $("#undo").onclick = () => { if (confirm("Undo the last time?")) undo(); };
+  $("#undo").onclick = () => { if (confirm("Undo the last step?")) undo(); };
   document.querySelectorAll(".t").forEach((el) => el.onclick = () => edit(+el.dataset.i, el.dataset.k));
+}
+
+function pausedMin(a, b) {  // minutes of the pauses between two times
+  const A = new Date(a).getTime(), B = new Date(b).getTime();
+  return Math.round(state.pauses.filter((p) => p.e).reduce((s, p) =>
+    s + Math.max(0, Math.min(B, new Date(p.e).getTime()) - Math.max(A, new Date(p.s).getTime())), 0) / 60000);
 }
 
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
 window.addEventListener("hashchange", () => location.reload());  // a new route's link opened over the old one
+setInterval(() => { if (state && (paused() || nextStep())) render(); }, 60000);  // the minutes shown keep up
 
 (async function start() {
   const parts = location.hash.slice(1).split(".");
   frag = parts[0];
   if (parts[1]) {
-    try { carried = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/"))); } catch (e) { carried = null; }
+    try {
+      const c = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+      carried = Array.isArray(c) ? { times: c, pauses: [] } : c;  // (the first version carried only the times)
+    } catch (e) { carried = null; }
   }
   if (!frag) {
     $("#app").innerHTML = `<div class="empty"><h1>Route log</h1><p class="muted">Open it from the QR code
