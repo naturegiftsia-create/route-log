@@ -1,0 +1,209 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width,initial-scale=1,viewport-fit=cover">
+<meta name="theme-color" content="#1a73e8">
+<link rel="manifest" href="manifest.json">
+<title>Route log</title>
+<style>
+  :root { --bg:#f6f7f9; --card:#fff; --text:#1d1f23; --muted:#5f6368; --blue:#1a73e8; --green:#188038;
+          --orange:#b35900; --red:#c5221f; --line:#e1e4e8; }
+  @media (prefers-color-scheme: dark) {
+    :root { --bg:#121417; --card:#1d2024; --text:#e8eaed; --muted:#9aa0a6; --line:#2c3036; --blue:#8ab4f8;
+            --green:#81c995; --orange:#fcad70; --red:#f28b82; }
+  }
+  * { box-sizing:border-box; }
+  body { margin:0; background:var(--bg); color:var(--text); font:16px/1.35 system-ui,-apple-system,"Segoe UI",Roboto,sans-serif;
+         padding:12px 16px 40px; }
+  h1 { font-size:18px; margin:4px 0 2px; }
+  .muted { color:var(--muted); font-size:14px; }
+  .card { background:var(--card); border:1px solid var(--line); border-radius:14px; padding:14px; margin:12px 0; }
+  .next .label { color:var(--muted); font-size:13px; text-transform:uppercase; letter-spacing:.04em; }
+  .next .name { font-size:22px; font-weight:700; margin:2px 0 6px; }
+  .next .eta { font-size:16px; }
+  .eta b { font-size:18px; }
+  button.big { display:block; width:100%; border:0; border-radius:12px; padding:18px; font-size:20px; font-weight:700;
+               color:#fff; background:var(--blue); margin-top:12px; }
+  button.big.arrive { background:var(--green); }
+  button.small { border:1px solid var(--line); background:var(--card); color:var(--text); border-radius:10px;
+                 padding:10px 12px; font-size:15px; }
+  .row { display:flex; gap:8px; flex-wrap:wrap; margin-top:10px; }
+  ol { list-style:none; padding:0; margin:0; }
+  li { border-top:1px solid var(--line); padding:10px 0; }
+  li:first-child { border-top:0; }
+  li.current { background:linear-gradient(90deg, rgba(26,115,232,.10), transparent); margin:0 -14px; padding:10px 14px; }
+  .pt { font-weight:600; }
+  .times { display:flex; gap:12px; flex-wrap:wrap; font-size:14px; color:var(--muted); margin-top:3px; }
+  .t { color:var(--text); text-decoration:underline dotted; cursor:pointer; }
+  .late { color:var(--red); } .early { color:var(--green); }
+  .done { color:var(--green); font-weight:700; }
+  .empty { text-align:center; padding:40px 10px; }
+</style>
+</head>
+<body>
+<div id="app"><p class="muted">Loading…</p></div>
+<script>
+// Route log (NatureGift Tools, 29.10.2026): the day's route comes inside this page's link (the part after '#',
+// which browsers never send to a server). Times are kept only on this phone (localStorage) until 'Save results'.
+"use strict";
+const $ = (s) => document.querySelector(s);
+const pad = (n) => String(n).padStart(2, "0");
+const hm = (d) => d ? pad(d.getHours()) + ":" + pad(d.getMinutes()) : "";
+const mins = (a, b) => Math.round((b - a) / 60000);
+let route = null, state = null, key = "";
+
+async function decode(fragment) {
+  const b64 = fragment.replace(/-/g, "+").replace(/_/g, "/");
+  const bytes = Uint8Array.from(atob(b64 + "===".slice((b64.length + 3) % 4)), (c) => c.charCodeAt(0));
+  const stream = new Blob([bytes]).stream().pipeThrough(new DecompressionStream("deflate-raw"));
+  return JSON.parse(await new Response(stream).text());
+}
+
+function save() { try { localStorage.setItem(key, JSON.stringify(state)); } catch (e) {} }
+
+function load() {
+  try { const s = JSON.parse(localStorage.getItem(key) || "null"); if (s && s.times) return s; } catch (e) {}
+  return { times: route.p.map(() => ({ a: null, l: null })) };  // a = arrived, l = left (ISO strings)
+}
+
+// the next thing to press: [point index, 'a' | 'l'] - the start is only left, the end only arrived at
+function nextStep() {
+  const n = route.p.length;
+  for (let i = 0; i < n; i++) {
+    const t = state.times[i];
+    if (i > 0 && !t.a) return [i, "a"];
+    if (i < n - 1 && !t.l) return [i, "l"];
+  }
+  return null;
+}
+
+function eta(i) {  // when Google expects us at point i, from the last real time before it
+  for (let j = i - 1; j >= 0; j--) {
+    const t = state.times[j];
+    const from = t.l ? new Date(t.l) : (t.a ? new Date(new Date(t.a).getTime() + route.m * 60000) : null);
+    if (from) {
+      let total = 0;
+      for (let k = j + 1; k <= i; k++) total += route.p[k][1] + (k < i ? route.m : 0);
+      return new Date(from.getTime() + total * 60000);
+    }
+  }
+  return null;
+}
+
+function stamp(i, kind) {
+  state.times[i][kind] = new Date().toISOString();
+  save(); render();
+}
+
+function edit(i, kind) {
+  const t = state.times[i][kind];
+  const now = t ? hm(new Date(t)) : hm(new Date());
+  const v = prompt((kind === "a" ? "Arrived at " : "Left ") + route.p[i][0] + " (HH:MM, empty = clear):", now);
+  if (v === null) return;
+  if (!v.trim()) { state.times[i][kind] = null; save(); render(); return; }
+  const m = v.trim().match(/^(\d{1,2})[:.](\d{2})$/);
+  if (!m) { alert("Write it like 14:35"); return; }
+  const [y, mo, d] = route.d.split("-").map(Number);
+  state.times[i][kind] = new Date(y, mo - 1, d, +m[1], +m[2]).toISOString();
+  save(); render();
+}
+
+function undo() {
+  for (let i = route.p.length - 1; i >= 0; i--) {
+    for (const k of ["l", "a"]) if (state.times[i][k]) { state.times[i][k] = null; save(); render(); return; }
+  }
+}
+
+function results() {
+  const points = route.p.map(([name, drive], i) => ({ name, google_drive_min: drive,
+    arrived: state.times[i].a, left: state.times[i].l }));
+  return { app: "NatureGift route log", version: 1, date: route.d, leave_planned: route.l, stop_min_planned: route.m,
+           points, saved_at: new Date().toISOString() };
+}
+
+async function saveResults() {
+  const text = JSON.stringify(results(), null, 1);
+  const name = "route-" + route.d + ".json";
+  const file = new File([text], name, { type: "application/json" });
+  try {
+    if (navigator.canShare && navigator.canShare({ files: [file] })) {  // Android: Drive, e-mail, ...
+      await navigator.share({ files: [file], title: name });
+      return;
+    }
+  } catch (e) { if (e.name === "AbortError") return; }
+  const a = document.createElement("a");  // else: download it
+  a.href = URL.createObjectURL(file); a.download = name; a.click();
+}
+
+function render() {
+  const n = route.p.length, step = nextStep();
+  let html = `<h1>Route ${route.d.split("-").reverse().join(".")}</h1>
+    <div class="muted">${n - 2} stops · planned leave ${route.l} · ${route.m} min per stop</div>`;
+  if (step) {
+    const [i, kind] = step, name = route.p[i][0];
+    let info = "";
+    if (kind === "a") {
+      const e = eta(i);
+      info = `<div class="eta">Google: ${route.p[i][1]} min drive${e ? ` → about <b>${hm(e)}</b>` : ""}</div>`;
+    } else if (i === 0) {
+      info = `<div class="eta">Planned: ${route.l}</div>`;
+    } else {
+      const a = new Date(state.times[i].a);
+      info = `<div class="eta">Here since ${hm(a)} (${mins(a, new Date())} min)</div>`;
+    }
+    html += `<div class="card next"><div class="label">${kind === "a" ? "Next" : (i === 0 ? "Start" : "Now at")}</div>
+      <div class="name">${esc(name)}</div>${info}
+      <button class="big ${kind === "a" ? "arrive" : ""}" id="go">${kind === "a" ? "Arrived" : "Leaving"}</button></div>`;
+  } else {
+    html += `<div class="card"><div class="done">Day done ✓</div>
+      <div class="muted">Save the results - they go to the Route planner.</div></div>`;
+  }
+  html += `<div class="row"><button class="small" id="save">Save results</button>
+    <button class="small" id="undo">Undo last</button></div><div class="card"><ol>`;
+  route.p.forEach(([name, drive], i) => {
+    const t = state.times[i], cur = step && step[0] === i;
+    let real = "";
+    if (i > 0 && t.a && state.times[i - 1].l) {
+      const d = mins(new Date(state.times[i - 1].l), new Date(t.a)), diff = d - drive;
+      real = ` · real <span class="${diff > 3 ? "late" : diff < -3 ? "early" : ""}">${d} min</span>`;
+    }
+    const stay = t.a && t.l ? ` · stop ${mins(new Date(t.a), new Date(t.l))} min` : "";
+    html += `<li class="${cur ? "current" : ""}"><div class="pt">${i === 0 ? "▶ " : i === n - 1 ? "■ " : i + ". "}${esc(name)}</div>
+      <div class="times">${i > 0 ? `<span>Google ${drive} min${real}</span>` : ""}
+      ${i > 0 ? `<span>arrived <span class="t" data-i="${i}" data-k="a">${t.a ? hm(new Date(t.a)) : "--:--"}</span></span>` : ""}
+      ${i < n - 1 ? `<span>left <span class="t" data-i="${i}" data-k="l">${t.l ? hm(new Date(t.l)) : "--:--"}</span></span>` : ""}
+      ${stay}</div></li>`;
+  });
+  html += "</ol></div>";
+  $("#app").innerHTML = html;
+  if (step) $("#go").onclick = () => stamp(step[0], step[1]);
+  $("#save").onclick = saveResults;
+  $("#undo").onclick = () => { if (confirm("Undo the last time?")) undo(); };
+  document.querySelectorAll(".t").forEach((el) => el.onclick = () => edit(+el.dataset.i, el.dataset.k));
+}
+
+function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
+
+window.addEventListener("hashchange", () => location.reload());  // a new route's link opened over the old one
+
+(async function start() {
+  const frag = location.hash.slice(1);
+  if (!frag) {
+    $("#app").innerHTML = `<div class="empty"><h1>Route log</h1><p class="muted">Open it from the QR code
+      'Log real times' in the Route planner (NatureGift Tools).</p></div>`;
+    return;
+  }
+  try { route = await decode(frag); } catch (e) {
+    $("#app").innerHTML = `<div class="empty"><h1>Route log</h1><p class="muted">This link can't be read -
+      scan the QR code again.</p></div>`;
+    return;
+  }
+  key = "routelog:" + route.d + ":" + frag.slice(0, 40);
+  state = load();
+  render();
+  if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
+})();
+</script>
+</body>
+</html>
