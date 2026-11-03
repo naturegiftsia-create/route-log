@@ -57,7 +57,8 @@ const $ = (s) => document.querySelector(s);
 const pad = (n) => String(n).padStart(2, "0");
 const hm = (d) => d ? pad(d.getHours()) + ":" + pad(d.getMinutes()) : "";
 const mins = (a, b) => Math.round((b - a) / 60000);
-const REASONS = [["charging", "⚡ Charging"], ["fuel", "⛽ Fuel"], ["lunch", "🍽 Lunch"], ["wc", "🚻 WC"], ["other", "Other"]];
+const REASONS = [["charging", "⚡ Charging"], ["fuel", "⛽ Fuel"], ["lunch", "🍽 Lunch"], ["wc", "🚻 WC"],
+  ["carwash", "🚿 Car wash"], ["shopping", "🛒 Shopping"], ["other", "Other"]];  // + car wash, shopping (3.11.2026)
 let route = null, state = null, key = "", frag = "", carried = null, choosing = false, hist = [];
 const android = /Android/i.test(navigator.userAgent);
 
