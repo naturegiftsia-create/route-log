@@ -44,6 +44,8 @@
   .skipped { text-decoration:line-through; color:var(--muted); }
   button.big.reason { background:var(--line); color:var(--text); margin-top:8px; padding:14px; }
   button.small:disabled { opacity:.45; }
+  input { display:block; width:100%; font-size:18px; padding:12px; margin-top:8px; border:1px solid var(--line);
+          border-radius:10px; background:var(--card); color:var(--text); }
 </style>
 </head>
 <body>
@@ -52,6 +54,8 @@
 // Route log (NatureGift Tools, 29.10.2026): the day's route comes inside this page's link (the part after '#',
 // which browsers never send to a server). Times are kept only on this phone (localStorage) until 'Save results'.
 // A point can be skipped; pauses (charging, fuel, lunch, WC) are logged apart - never counted as driving or stop time.
+// A new stop can be added on the road (3.11.2026): it goes in as the next one; Google never timed it, so the way to
+// it and on from it are not compared. Its place: an address typed, or where the phone is (asked only then).
 "use strict";
 const $ = (s) => document.querySelector(s);
 const pad = (n) => String(n).padStart(2, "0");
@@ -59,7 +63,7 @@ const hm = (d) => d ? pad(d.getHours()) + ":" + pad(d.getMinutes()) : "";
 const mins = (a, b) => Math.round((b - a) / 60000);
 const REASONS = [["charging", "⚡ Charging"], ["fuel", "⛽ Fuel"], ["lunch", "🍽 Lunch"], ["wc", "🚻 WC"],
   ["carwash", "🚿 Car wash"], ["shopping", "🛒 Shopping"], ["other", "Other"]];  // + car wash, shopping (3.11.2026)
-let route = null, state = null, key = "", frag = "", carried = null, choosing = false, hist = [];
+let route = null, state = null, key = "", frag = "", carried = null, choosing = false, adding = null, hist = [];
 const android = /Android/i.test(navigator.userAgent);
 
 function canSendFiles() {  // Chrome: yes; Firefox and some others: no -> they can only download
@@ -67,7 +71,11 @@ function canSendFiles() {  // Chrome: yes; Firefox and some others: no -> they c
   catch (e) { return false; }
 }
 
-const b64url = (s) => btoa(s).replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+// UTF-8 first: the carried state has the names now (ā, ņ...), and btoa takes only Latin-1
+const b64url = (s) => btoa(String.fromCharCode(...new TextEncoder().encode(s)))
+  .replace(/\+/g, "-").replace(/\//g, "_").replace(/=+$/, "");
+const unb64url = (s) => new TextDecoder().decode(Uint8Array.from(atob(s.replace(/-/g, "+").replace(/_/g, "/")),
+                                                                    (c) => c.charCodeAt(0)));
 
 // the same page in Chrome, everything logged so far going along (after a '.' in the link)
 function chromeLink() {
@@ -91,18 +99,20 @@ function save() {
   catch (e) {}
 }
 
-function fresh() { return { times: route.p.map(() => ({ a: null, l: null })), pauses: [] }; }
+function fresh() { return { p: route.p.slice(), times: route.p.map(() => ({ a: null, l: null })), pauses: [] }; }
 
 function load() {
   let s = null;
   try { s = JSON.parse(localStorage.getItem(key) || "null"); hist = JSON.parse(localStorage.getItem(key + ":h") || "[]"); }
   catch (e) {}
   if (!(s && s.times)) s = null;
-  if (carried && carried.times && carried.times.length === route.p.length && (!s || marks(carried) > marks(s))) {
+  if (carried && carried.times && carried.times.length === (carried.p || route.p).length &&
+      (!s || marks(carried) > marks(s))) {
     s = carried; hist = [];  // came over from Firefox
   }
   s = s || fresh();
   s.pauses = s.pauses || [];
+  s.p = s.p || route.p.slice();  // saved before stops could be added
   return s;
 }
 
@@ -122,7 +132,7 @@ const paused = () => { const p = state.pauses[state.pauses.length - 1]; return p
 
 // the next thing to press: [point index, 'a' | 'l'] - the start is only left, the end only arrived at
 function nextStep() {
-  const n = route.p.length;
+  const n = state.p.length;
   for (let i = 0; i < n; i++) {
     const t = state.times[i];
     if (t.s) continue;
@@ -139,7 +149,7 @@ function eta(i) {  // when Google expects us at point i, from the last real time
     const from = t.l ? new Date(t.l) : (t.a ? new Date(new Date(t.a).getTime() + route.m * 60000) : null);
     if (from) {
       let total = 0;
-      for (let k = j + 1; k <= i; k++) total += route.p[k][1] + (k < i && !state.times[k].s ? route.m : 0);
+      for (let k = j + 1; k <= i; k++) total += (state.p[k][1] || 0) + (k < i && !state.times[k].s ? route.m : 0);
       const p = paused();
       const extra = p ? mins(new Date(p.s), new Date()) : 0;  // the pause so far pushes it on
       return new Date(from.getTime() + (total + extra) * 60000);
@@ -151,7 +161,7 @@ function eta(i) {  // when Google expects us at point i, from the last real time
 function stamp(i, kind) { change(() => { state.times[i][kind] = new Date().toISOString(); }); }
 
 function skip(i) {
-  if (confirm("Skip " + route.p[i][0] + "? (not visited today)")) change(() => { state.times[i].s = true; });
+  if (confirm("Skip " + state.p[i][0] + "? (not visited today)")) change(() => { state.times[i].s = true; });
 }
 
 function pause(reason) {
@@ -164,7 +174,7 @@ function resume() { change(() => { paused().e = new Date().toISOString(); }); }
 function edit(i, kind) {
   const t = state.times[i][kind];
   const now = t ? hm(new Date(t)) : hm(new Date());
-  const v = prompt((kind === "a" ? "Arrived at " : "Left ") + route.p[i][0] + " (HH:MM, empty = clear):", now);
+  const v = prompt((kind === "a" ? "Arrived at " : "Left ") + state.p[i][0] + " (HH:MM, empty = clear):", now);
   if (v === null) return;
   if (!v.trim()) { change(() => { state.times[i][kind] = null; }); return; }
   const m = v.trim().match(/^(\d{1,2})[:.](\d{2})$/);
@@ -174,10 +184,15 @@ function edit(i, kind) {
 }
 
 function results() {
-  const points = route.p.map(([name, drive, planned], i) => {
+  const points = state.p.map(([name, drive, planned, ll, extra], i) => {
     const t = state.times[i], p = { name, google_drive_min: drive, arrived: t.a, left: t.l };
     if (planned) p.planned = planned;
     if (t.s) p.skipped = true;
+    if (extra && extra.added) {
+      p.added = extra.added;
+      if (extra.address) p.address = extra.address;
+      if (ll) { p.lat = ll[0]; p.lng = ll[1]; }
+    }
     return p;
   });
   const pauses = state.pauses.filter((p) => p.e).map((p) => ({ reason: p.r, start: p.s, end: p.e }));
@@ -203,11 +218,47 @@ async function saveResults() {
 
 // Waze from wherever you are now to that point (user, 29.10.2026 - everyone here has Waze)
 const waze = ([lat, lng]) => `https://waze.com/ul?ll=${lat},${lng}&navigate=yes`;
+const wazeTo = (pt) => pt[3] ? waze(pt[3]) : (pt[4] && pt[4].address ?
+  `https://waze.com/ul?q=${encodeURIComponent(pt[4].address)}&navigate=yes` : "");
+
+// ---- a new stop on the road
+function newStopAt() {  // before the point we're driving to; at a stop: right after it; never after the end
+  const step = nextStep(), n = state.p.length;
+  if (!step) return n - 1;
+  return Math.max(1, Math.min(n - 1, step[1] === "a" ? step[0] : step[0] + 1));
+}
+
+function addStop(here) {
+  const name = $("#ns-name").value.trim(), address = $("#ns-addr").value.trim(), ll = adding.ll;
+  if (!name) { alert("Write the stop's name"); return; }
+  if (here && !ll && !address && !confirm("No place given - add it anyway?")) return;
+  const at = newStopAt(), now = new Date().toISOString();
+  adding = null;
+  change(() => {
+    state.p.splice(at, 0, [name, null, "", ll || null, { added: now, address }]);
+    state.times.splice(at, 0, { a: here ? now : null, l: null });
+  });
+}
+
+function locate() {
+  if (!navigator.geolocation) { alert("This phone's browser can't tell where it is - type the address."); return; }
+  adding.name = $("#ns-name").value; adding.address = $("#ns-addr").value;
+  adding.where = "Finding where you are…"; render();
+  navigator.geolocation.getCurrentPosition((pos) => {
+    adding.ll = [+pos.coords.latitude.toFixed(5), +pos.coords.longitude.toFixed(5)];
+    adding.where = `📍 ${adding.ll[0]}, ${adding.ll[1]} (±${Math.round(pos.coords.accuracy)} m)`;
+    render();
+  }, (err) => {
+    adding.where = err.code === 1 ? "Location not allowed - type the address (or allow it for this page in the browser)."
+                                  : "Couldn't find where you are - type the address.";
+    render();
+  }, { enableHighAccuracy: true, timeout: 20000, maximumAge: 30000 });
+}
 
 const reasonText = (r) => (REASONS.find((x) => x[0] === r) || [r, r])[1];
 
 function render() {
-  const n = route.p.length, step = nextStep(), p = paused();
+  const n = state.p.length, step = nextStep(), p = paused();
   let html = `<h1>Route ${route.d.split("-").reverse().join(".")}</h1>
     <div class="muted">${n - 2} stops · planned leave ${route.l} · ${route.m} min per stop</div>`;
   if (p) {
@@ -215,16 +266,27 @@ function render() {
       <div class="name">${reasonText(p.r)}</div>
       <div class="eta">since ${hm(new Date(p.s))} (${mins(new Date(p.s), new Date())} min) - not counted as driving</div>
       <button class="big arrive" id="resume">Continue</button></div>`;
+  } else if (adding) {
+    html += `<div class="card next"><div class="label">New stop</div>
+      <input id="ns-name" placeholder="Name (client, shop…)" value="${esc(adding.name || "")}" autocomplete="off">
+      <input id="ns-addr" placeholder="Address (or the button below)" value="${esc(adding.address || "")}" autocomplete="off">
+      <button class="small" id="ns-gps" style="margin-top:8px">📍 Where I am now</button>
+      ${adding.where ? `<div class="muted" style="margin-top:6px">${esc(adding.where)}</div>` : ""}
+      <button class="big arrive" id="ns-here">I'm there now</button>
+      <button class="big" id="ns-next">Go there next</button>
+      <button class="small" id="ns-cancel" style="margin-top:12px">Cancel</button></div>`;
   } else if (choosing) {
     html += `<div class="card next"><div class="label">Pause for</div>
       ${REASONS.map(([r, t]) => `<button class="big reason" data-r="${r}">${t}</button>`).join("")}
       <button class="small" id="nopause" style="margin-top:12px">Cancel</button></div>`;
   } else if (step) {
-    const [i, kind] = step, name = route.p[i][0];
+    const [i, kind] = step, name = state.p[i][0];
     let info = "";
     if (kind === "a") {
       const e = eta(i);
-      info = `<div class="eta">Google: ${route.p[i][1]} min drive${e ? ` → about <b>${hm(e)}</b>` : ""}</div>`;
+      info = state.p[i][1] === null ? `<div class="eta">New stop${state.p[i][4] && state.p[i][4].address ?
+        " · " + esc(state.p[i][4].address) : ""}</div>` :
+        `<div class="eta">Google: ${state.p[i][1]} min drive${e ? ` → about <b>${hm(e)}</b>` : ""}</div>`;
     } else if (i === 0) {
       info = `<div class="eta">Planned: ${route.l}</div>`;
     } else {
@@ -233,7 +295,7 @@ function render() {
     }
     html += `<div class="card next"><div class="label">${kind === "a" ? "Next" : (i === 0 ? "Start" : "Now at")}</div>
       <div class="name">${esc(name)}</div>${info}
-      ${kind === "a" && route.p[i][3] ? `<a href="${waze(route.p[i][3])}" target="_blank" rel="noopener"><button class="big waze">Drive with Waze</button></a>` : ""}
+      ${kind === "a" && wazeTo(state.p[i]) ? `<a href="${wazeTo(state.p[i])}" target="_blank" rel="noopener"><button class="big waze">Drive with Waze</button></a>` : ""}
       <button class="big ${kind === "a" ? "arrive" : ""}" id="go">${kind === "a" ? "Arrived" : "Leaving"}</button>
       ${kind === "a" && i < n - 1 ? `<button class="small" id="skip" style="margin-top:10px">Skip this one</button>` : ""}</div>`;
   } else {
@@ -245,23 +307,25 @@ function render() {
       'Save results' sends them to Gmail / Drive. Everything logged so far goes along.</div>
       <a href="${chromeLink()}"><button class="big">Open in Chrome</button></a></div>`;
   }
-  html += `<div class="row">${!p && !choosing && step ? `<button class="small" id="pause">Pause…</button>` : ""}
+  html += `<div class="row">${!p && !choosing && !adding && step ? `<button class="small" id="pause">Pause…</button>` : ""}
+    ${!p && !choosing && !adding ? `<button class="small" id="add">+ New stop</button>` : ""}
     <button class="small" id="save">Save results</button>
     <button class="small" id="undo" ${hist.length ? "" : "disabled"}>Undo last</button></div><div class="card"><ol>`;
-  route.p.forEach(([name, drive], i) => {
+  state.p.forEach(([name, drive, _pl, _ll, extra], i) => {
     const t = state.times[i], cur = step && step[0] === i;
     if (t.s) {
       html += `<li><div class="pt skipped">${i}. ${esc(name)}</div><div class="times">skipped</div></li>`;
       return;
     }
     let real = "";
-    if (i > 0 && t.a && state.times[i - 1].l && !state.times[i - 1].s) {
+    if (i > 0 && drive !== null && state.p[i - 1][1] !== null && t.a && state.times[i - 1].l && !state.times[i - 1].s) {
       const d = mins(new Date(state.times[i - 1].l), new Date(t.a)) - pausedMin(state.times[i - 1].l, t.a), diff = d - drive;
       real = ` · real <span class="${diff > 3 ? "late" : diff < -3 ? "early" : ""}">${d} min</span>`;
     }
     const stay = t.a && t.l ? ` · stop ${mins(new Date(t.a), new Date(t.l)) - pausedMin(t.a, t.l)} min` : "";
     html += `<li class="${cur ? "current" : ""}"><div class="pt">${i === 0 ? "▶ " : i === n - 1 ? "■ " : i + ". "}${esc(name)}</div>
-      <div class="times">${i > 0 ? `<span>Google ${drive} min${real}</span>` : ""}
+      <div class="times">${i > 0 ? (drive === null ? `<span class="done">new stop</span>` :
+        `<span>Google ${drive} min${real}</span>`) : ""}
       ${i > 0 ? `<span>arrived <span class="t" data-i="${i}" data-k="a">${t.a ? hm(new Date(t.a)) : "--:--"}</span></span>` : ""}
       ${i < n - 1 ? `<span>left <span class="t" data-i="${i}" data-k="l">${t.l ? hm(new Date(t.l)) : "--:--"}</span></span>` : ""}
       ${stay}</div></li>`;
@@ -278,6 +342,11 @@ function render() {
   if ($("#pause")) $("#pause").onclick = () => { choosing = true; render(); };
   if ($("#nopause")) $("#nopause").onclick = () => { choosing = false; render(); };
   if ($("#resume")) $("#resume").onclick = resume;
+  if ($("#add")) $("#add").onclick = () => { adding = {}; render(); $("#ns-name").focus(); };
+  if ($("#ns-gps")) $("#ns-gps").onclick = locate;
+  if ($("#ns-here")) $("#ns-here").onclick = () => addStop(true);
+  if ($("#ns-next")) $("#ns-next").onclick = () => addStop(false);
+  if ($("#ns-cancel")) $("#ns-cancel").onclick = () => { adding = null; render(); };
   document.querySelectorAll(".reason").forEach((el) => el.onclick = () => pause(el.dataset.r));
   $("#save").onclick = saveResults;
   $("#undo").onclick = () => { if (confirm("Undo the last step?")) undo(); };
@@ -293,14 +362,14 @@ function pausedMin(a, b) {  // minutes of the pauses between two times
 function esc(s) { return String(s).replace(/[&<>"]/g, (c) => ({ "&": "&amp;", "<": "&lt;", ">": "&gt;", '"': "&quot;" }[c])); }
 
 window.addEventListener("hashchange", () => location.reload());  // a new route's link opened over the old one
-setInterval(() => { if (state && (paused() || nextStep())) render(); }, 60000);  // the minutes shown keep up
+setInterval(() => { if (state && !adding && (paused() || nextStep())) render(); }, 60000);  // the minutes shown keep up
 
 (async function start() {
   const parts = location.hash.slice(1).split(".");
   frag = parts[0];
   if (parts[1]) {
     try {
-      const c = JSON.parse(atob(parts[1].replace(/-/g, "+").replace(/_/g, "/")));
+      const c = JSON.parse(unb64url(parts[1]));
       carried = Array.isArray(c) ? { times: c, pauses: [] } : c;  // (the first version carried only the times)
     } catch (e) { carried = null; }
   }
