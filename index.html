@@ -56,6 +56,9 @@
 // A point can be skipped; pauses (charging, fuel, lunch, WC) are logged apart - never counted as driving or stop time.
 // A new stop can be added on the road (3.11.2026): it goes in as the next one; Google never timed it, so the way to
 // it and on from it are not compared. Its place: an address typed, or where the phone is (asked only then).
+// The same route sent again from the Route planner (3.11.2026: 'Send update' - a push to the driver's ntfy app): a link
+// with the same route id ('i') merges into what's logged - every time kept, new stops in their place, and the stops
+// added here or already visited stay even if the PC's list no longer has them.
 "use strict";
 const $ = (s) => document.querySelector(s);
 const pad = (n) => String(n).padStart(2, "0");
@@ -99,7 +102,41 @@ function save() {
   catch (e) {}
 }
 
-function fresh() { return { p: route.p.slice(), times: route.p.map(() => ({ a: null, l: null })), pauses: [] }; }
+function fresh() { return { p: route.p.slice(), times: route.p.map(() => ({ a: null, l: null })), pauses: [], f: frag }; }
+
+// an updated link for a route already being logged: the new order, everything logged so far kept
+function merge(old) {
+  const np = route.p, used = new Set();
+  const same = (a, b) => a[0] === b[0] && (a[2] || "") === (b[2] || "");
+  const isAdded = (q) => !!(q[4] && q[4].added);
+  const match = np.map((q) => {  // in order: Vērdiņi at the start finds the first one, at the end the last
+    for (let k = 0; k < old.p.length; k++) {
+      if (!used.has(k) && !isAdded(old.p[k]) && same(old.p[k], q)) { used.add(k); return k; }
+    }
+    return -1;
+  });
+  const posOf = {};
+  match.forEach((k, j) => { if (k >= 0) posOf[k] = j; });
+  const extra = {}, removed = [];
+  old.p.forEach((q, k) => {
+    if (used.has(k)) return;
+    const t = old.times[k];
+    if (!(isAdded(q) || t.a || t.l || t.s)) { removed.push(q[0]); return; }  // planned, not visited: the PC dropped it
+    let a = k - 1;
+    while (a >= 0 && posOf[a] === undefined) a--;
+    const j = Math.max(0, Math.min(a >= 0 ? posOf[a] : 0, np.length - 2));  // never after the end
+    (extra[j] = extra[j] || []).push(k);
+  });
+  const P = [], T = [];
+  np.forEach((q, j) => {
+    P.push(q.slice());
+    T.push(match[j] >= 0 ? old.times[match[j]] : { a: null, l: null });
+    (extra[j] || []).forEach((k) => { P.push(old.p[k]); T.push(old.times[k]); });
+  });
+  const added = np.filter((q, j) => match[j] < 0).map((q) => q[0]);
+  return { p: P, times: T, pauses: old.pauses || [], f: frag,
+           upd: { added, removed, at: new Date().toISOString() } };
+}
 
 function load() {
   let s = null;
@@ -113,6 +150,7 @@ function load() {
   s = s || fresh();
   s.pauses = s.pauses || [];
   s.p = s.p || route.p.slice();  // saved before stops could be added
+  if (s.f && s.f !== frag) { s = merge(s); hist = []; }  // the PC sent this route again, changed
   return s;
 }
 
@@ -261,6 +299,14 @@ function render() {
   const n = state.p.length, step = nextStep(), p = paused();
   let html = `<h1>Route ${route.d.split("-").reverse().join(".")}</h1>
     <div class="muted">${n - 2} stops · planned leave ${route.l} · ${route.m} min per stop</div>`;
+  if (state.upd) {
+    const u = state.upd;
+    html += `<div class="card next"><div class="label">Route updated ${hm(new Date(u.at))}</div>
+      ${u.added.length ? `<div class="eta">New: <b>${u.added.map(esc).join(", ")}</b></div>` : ""}
+      ${u.removed.length ? `<div class="eta">Taken off: ${u.removed.map(esc).join(", ")}</div>` : ""}
+      ${!u.added.length && !u.removed.length ? `<div class="eta">The order or the times changed.</div>` : ""}
+      <button class="small" id="upd-ok" style="margin-top:10px">OK</button></div>`;
+  }
   if (p) {
     html += `<div class="card next"><div class="label">Paused</div>
       <div class="name">${reasonText(p.r)}</div>
@@ -342,6 +388,7 @@ function render() {
   if ($("#pause")) $("#pause").onclick = () => { choosing = true; render(); };
   if ($("#nopause")) $("#nopause").onclick = () => { choosing = false; render(); };
   if ($("#resume")) $("#resume").onclick = resume;
+  if ($("#upd-ok")) $("#upd-ok").onclick = () => { delete state.upd; save(); render(); };
   if ($("#add")) $("#add").onclick = () => { adding = {}; render(); $("#ns-name").focus(); };
   if ($("#ns-gps")) $("#ns-gps").onclick = locate;
   if ($("#ns-here")) $("#ns-here").onclick = () => addStop(true);
@@ -383,8 +430,9 @@ setInterval(() => { if (state && !adding && (paused() || nextStep())) render(); 
       scan the QR code again.</p></div>`;
     return;
   }
-  key = "routelog:" + route.d + ":" + frag.slice(0, 40);
+  key = route.i ? "routelog:" + route.d + ":" + route.i : "routelog:" + route.d + ":" + frag.slice(0, 40);
   state = load();
+  save();  // a merged update is kept at once
   render();
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 })();
