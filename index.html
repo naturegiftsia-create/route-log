@@ -186,8 +186,10 @@ function results() {
 
 async function saveResults() {
   const text = JSON.stringify(results(), null, 1);
-  const name = "route-" + route.d + ".json";
-  const file = new File([text], name, { type: "application/json" });
+  // .txt, not .json: Chrome on Android won't share a .json file - it opened it instead (3.11.2026).
+  // The PC reads both; the content is the same JSON.
+  const name = "route-" + route.d + ".txt";
+  const file = new File([text], name, { type: "text/plain" });
   try {
     if (navigator.canShare && navigator.canShare({ files: [file] })) {  // Android: Gmail, Drive, ...
       await navigator.share({ files: [file], title: name });
