@@ -59,6 +59,8 @@
 // The same route sent again from the Route planner (3.11.2026: 'Send update' - a push to the driver's ntfy app): a link
 // with the same route id ('i') merges into what's logged - every time kept, new stops in their place, and the stops
 // added here or already visited stay even if the PC's list no longer has them.
+// The office sees the progress (3.11.2026): after every press the whole state goes to our push server (route.s: server,
+// channel, a key that can only write this driver's status). No signal: the newest status waits and goes when there is.
 "use strict";
 const $ = (s) => document.querySelector(s);
 const pad = (n) => String(n).padStart(2, "0");
@@ -154,16 +156,52 @@ function load() {
   return s;
 }
 
+// ---- the office sees the progress
+let sendTimer = null, lastSent = null, sendFailed = false;
+const pendingKey = () => key + ":pending";
+
+function status() {
+  const p = paused();
+  return { v: 1, d: route.d, i: route.i || "", at: new Date().toISOString(),
+           p: state.p.map((q, i) => { const t = state.times[i];
+             return [q[0], t.a, t.l, t.s ? 1 : 0, q[4] && q[4].added ? 1 : 0]; }),
+           pause: p ? { r: p.r, s: p.s } : null };
+}
+
+function queueStatus() {  // a few seconds' wait: several presses in a row go as one
+  if (!route.s) return;
+  try { localStorage.setItem(pendingKey(), "1"); } catch (e) {}
+  clearTimeout(sendTimer);
+  sendTimer = setTimeout(sendStatus, 3000);
+}
+
+async function sendStatus() {
+  let pending = true;
+  try { pending = localStorage.getItem(pendingKey()) === "1"; } catch (e) {}
+  if (!route.s || !pending || !navigator.onLine) return;
+  try {
+    const r = await fetch(route.s.u, { method: "POST", headers: { Authorization: "Bearer " + route.s.k },
+      body: JSON.stringify({ topic: route.s.t, message: JSON.stringify(status()), priority: 1 }) });
+    if (!r.ok) throw new Error("HTTP " + r.status);
+    try { localStorage.removeItem(pendingKey()); } catch (e) {}
+    lastSent = new Date(); sendFailed = false;
+  } catch (e) { sendFailed = true; }  // no signal: tried again in a minute, or when the phone is back online
+  if (!adding) render();
+}
+window.addEventListener("online", sendStatus);
+document.addEventListener("visibilitychange", () => { if (!document.hidden) sendStatus(); });
+setInterval(sendStatus, 60000);
+
 // every change can be undone, one step at a time
 function change(fn) {
   hist.push(JSON.stringify(state));
   if (hist.length > 60) hist.shift();
-  fn(); save(); render();
+  fn(); save(); render(); queueStatus();
 }
 
 function undo() {
   if (!hist.length) return;
-  state = JSON.parse(hist.pop()); save(); render();
+  state = JSON.parse(hist.pop()); save(); render(); queueStatus();
 }
 
 const paused = () => { const p = state.pauses[state.pauses.length - 1]; return p && !p.e ? p : null; };
@@ -299,6 +337,12 @@ function render() {
   const n = state.p.length, step = nextStep(), p = paused();
   let html = `<h1>Route ${route.d.split("-").reverse().join(".")}</h1>
     <div class="muted">${n - 2} stops · planned leave ${route.l} · ${route.m} min per stop</div>`;
+  if (route.s) {
+    let waiting = false;
+    try { waiting = localStorage.getItem(pendingKey()) === "1"; } catch (e) {}
+    html += `<div class="muted">${waiting ? (navigator.onLine && !sendFailed ? "Sending to the office…" :
+      "No signal - the office gets it when there is") : (lastSent ? `Office up to date ✓ ${hm(lastSent)}` : "")}</div>`;
+  }
   if (state.upd) {
     const u = state.upd;
     html += `<div class="card next"><div class="label">Route updated ${hm(new Date(u.at))}</div>
@@ -433,6 +477,7 @@ setInterval(() => { if (state && !adding && (paused() || nextStep())) render(); 
   key = route.i ? "routelog:" + route.d + ":" + route.i : "routelog:" + route.d + ":" + frag.slice(0, 40);
   state = load();
   save();  // a merged update is kept at once
+  if (route.s && marks(state)) queueStatus();
   render();
   if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catch(() => {});
 })();
