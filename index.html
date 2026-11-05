@@ -159,13 +159,21 @@ function load() {
 // ---- the office sees the progress
 let sendTimer = null, lastSent = null, sendFailed = false;
 const pendingKey = () => key + ":pending";
+function pending() { try { return localStorage.getItem(pendingKey()) === "1"; } catch (e) { return false; } }
 
+// Everything 'Save results' has goes along too (5.11.2026), so the PC saves the day's log by itself:
+// per point also Google's minutes, the planned id, and for a stop added here its address and place;
+// the ended pauses; the planned leaving time and minutes per stop.
 function status() {
   const p = paused();
-  return { v: 1, d: route.d, i: route.i || "", at: new Date().toISOString(),
-           p: state.p.map((q, i) => { const t = state.times[i];
-             return [q[0], t.a, t.l, t.s ? 1 : 0, q[4] && q[4].added ? 1 : 0]; }),
+  const full = { v: 1, d: route.d, i: route.i || "", at: new Date().toISOString(), l: route.l, m: route.m,
+           p: state.p.map((q, i) => { const t = state.times[i], x = q[4] || {};
+             return [q[0], t.a, t.l, t.s ? 1 : 0, x.added ? 1 : 0, q[1], q[2] || "", x.address || "", q[3] || null]; }),
+           pz: state.pauses.filter((z) => z.e).map((z) => [z.r, z.s, z.e]),
            pause: p ? { r: p.r, s: p.s } : null };
+  if (new TextEncoder().encode(JSON.stringify(full)).length < 15000) return full;
+  // over the server's 16K: the progress only (the day then goes with 'Save results')
+  return Object.assign(full, { pz: undefined, p: full.p.map((q) => q.slice(0, 5)) });
 }
 
 function queueStatus() {  // a few seconds' wait: several presses in a row go as one
@@ -390,7 +398,8 @@ function render() {
       ${kind === "a" && i < n - 1 ? `<button class="small" id="skip" style="margin-top:10px">Skip this one</button>` : ""}</div>`;
   } else {
     html += `<div class="card"><div class="done">Day done ✓</div>
-      <div class="muted">Save the results - they go to the Route planner.</div></div>`;
+      <div class="muted">${route.s ? (pending() ? "No signal yet - the day goes to the office as soon as there is."
+        : "Sent to the office ✓ - nothing to save.") : "Save the results - they go to the Route planner."}</div></div>`;
   }
   if (android && !canSendFiles()) {
     html += `<div class="card"><div class="muted">This browser can only download the results - in Chrome
