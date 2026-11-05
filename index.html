@@ -168,7 +168,7 @@ function status() {
   const p = paused();
   const full = { v: 1, d: route.d, i: route.i || "", at: new Date().toISOString(), l: route.l, m: route.m,
            p: state.p.map((q, i) => { const t = state.times[i], x = q[4] || {};
-             return [q[0], t.a, t.l, t.s ? 1 : 0, x.added ? 1 : 0, q[1], q[2] || "", x.address || "", q[3] || null]; }),
+             return [q[0], t.a, t.l, t.s ? 1 : 0, x.added ? 1 : 0, q[1], q[2] || "", x.address || "", q[3] || null, t.g || null]; }),
            pz: state.pauses.filter((z) => z.e).map((z) => [z.r, z.s, z.e]),
            pause: p ? { r: p.r, s: p.s } : null };
   if (new TextEncoder().encode(JSON.stringify(full)).length < 15000) return full;
@@ -242,7 +242,25 @@ function eta(i) {  // when Google expects us at point i, from the last real time
   return null;
 }
 
-function stamp(i, kind) { change(() => { state.times[i][kind] = new Date().toISOString(); }); }
+function stamp(i, kind) {
+  change(() => { state.times[i][kind] = new Date().toISOString(); });
+  if (kind === "a" && i > 0 && i < state.p.length - 1) arrivedHere(i);
+}
+
+// Where 'Arrived' was really pressed (user, 5.11.2026): the Route planner offers it as the stop's real place when it's
+// far from where it thought the stop is (Lāči Vivo at the Benūži logistics place). One point a press, not tracking.
+function arrivedHere(i) {
+  if (!navigator.geolocation) return;
+  const t = state.times[i];
+  const go = () => navigator.geolocation.getCurrentPosition((pos) => {
+    if (state.times[i] !== t || !t.a) return;  // undone meanwhile
+    t.g = [+pos.coords.latitude.toFixed(5), +pos.coords.longitude.toFixed(5), Math.round(pos.coords.accuracy)];
+    save(); queueStatus();
+  }, () => {}, { enableHighAccuracy: true, timeout: 20000, maximumAge: 30000 });
+  // location turned off for this page: never asked again here (only + New stop asks)
+  if (navigator.permissions) navigator.permissions.query({ name: "geolocation" }).then((p) => { if (p.state !== "denied") go(); }, go);
+  else go();
+}
 
 function skip(i) {
   if (confirm("Skip " + state.p[i][0] + "? (not visited today)")) change(() => { state.times[i].s = true; });
@@ -272,6 +290,7 @@ function results() {
     const t = state.times[i], p = { name, google_drive_min: drive, arrived: t.a, left: t.l };
     if (planned) p.planned = planned;
     if (t.s) p.skipped = true;
+    if (t.g) p.gps = t.g;  // where 'Arrived' was pressed: [lat, lng, ± metres]
     if (extra && extra.added) {
       p.added = extra.added;
       if (extra.address) p.address = extra.address;
